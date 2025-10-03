@@ -18,7 +18,7 @@ DIRECTORY_SHEET_NAME = 'Sheet1'
 TRACKER_CAMERA_SHEET = 'camera'
 
 # Output file
-OUTPUT_EXCEL = 'JP-NRT-INZ1A_switch_camera_tracker_populated.xlsx'
+OUTPUT_EXCEL = 'JP-NRT-INZ1A_switch_camera_tracker_UPDATED.xlsx'
 
 # Column names in directory report (adjust if your Excel has different column names)
 DIR_COL_CAMERA_NAME = 'Camera stream name'
@@ -41,6 +41,7 @@ def normalize_mac(mac_address):
 YELLOW_FILL = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')  # No name found
 ORANGE_FILL = PatternFill(start_color='FFA500', end_color='FFA500', fill_type='solid')  # No switch info found
 LIGHTBLUE_FILL = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid')  # Duplicate MAC (same camera, different names)
+RED_FILL = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')  # Duplicate IP with different MAC
 
 def main():
     # Read the JSON file with camera inventory (switch info)
@@ -94,6 +95,13 @@ def main():
     duplicate_macs = directory_df[directory_df['MAC_normalized'].notna()].duplicated(subset=['MAC_normalized'], keep=False).sum()
     if duplicate_macs > 0:
         print(f"Note: Found {duplicate_macs} rows with duplicate MAC addresses (will be highlighted in light blue)")
+    
+    # Check for duplicate IPs with different MACs
+    # Group by IP and check if there are different MACs for the same IP
+    ip_groups = directory_df[directory_df[DIR_COL_IP_ADDRESS].notna()].groupby(DIR_COL_IP_ADDRESS)['MAC_normalized'].nunique()
+    duplicate_ips = (ip_groups > 1).sum()
+    if duplicate_ips > 0:
+        print(f"WARNING: Found {duplicate_ips} IP addresses shared by different MAC addresses (will be highlighted in RED)")
 
     
     # Load the tracker workbook
@@ -112,12 +120,16 @@ def main():
     no_switch_info_count = 0
     no_name_info_count = 0
     duplicate_mac_count = 0
+    duplicate_ip_count = 0
     
     # Track which MACs from inventory we've used
     used_macs = set()
     
     # Track MACs we've already written to detect duplicates
-    written_macs = {}  # mac -> list of (row_num, camera_name)
+    written_macs = {}  # mac -> list of (row_num, camera_name, ip_address)
+    
+    # Track IPs we've already written to detect IP duplicates with different MACs
+    written_ips = {}  # ip -> list of (row_num, mac_address)
     
     # NOTE: This script handles cases where the same camera (MAC/IP) appears 
     # with different names in the directory. When duplicates are found,
@@ -132,7 +144,24 @@ def main():
         original_mac = cam_row[DIR_COL_MAC_ADDRESS]
         
         # Check if this MAC was already written (duplicate detection)
-        is_duplicate = mac in written_macs if mac else False
+        is_duplicate_mac = mac in written_macs if mac else False
+        
+        # Check if this MAC has a DIFFERENT IP than previous entries
+        is_same_mac_diff_ip = False
+        if is_duplicate_mac and ip_address:
+            for prev_row, prev_name, prev_ip in written_macs[mac]:
+                if prev_ip and prev_ip != ip_address:
+                    is_same_mac_diff_ip = True
+                    break
+        
+        # Check if this IP was already written with a DIFFERENT MAC
+        is_duplicate_ip_diff_mac = False
+        if ip_address and ip_address in written_ips:
+            # Check if any of the previous MACs for this IP are different
+            for prev_row, prev_mac in written_ips[ip_address]:
+                if prev_mac != mac:
+                    is_duplicate_ip_diff_mac = True
+                    break
         
         # Look up switch info from inventory
         switch_info = inventory_dict.get(mac)
@@ -145,8 +174,38 @@ def main():
             ws.cell(row=row_num, column=4, value=switch_info['switch_name'])
             ws.cell(row=row_num, column=5, value=switch_info['port'])
             
-            # If this is a duplicate MAC, highlight in light blue
-            if is_duplicate:
+            # Priority order for highlighting: RED > LIGHT BLUE
+            # RED covers both: same IP/different MAC AND same MAC/different IP
+            if is_duplicate_ip_diff_mac or is_same_mac_diff_ip:
+                # Network conflict - RED (most critical)
+                for col in range(1, 6):
+                    ws.cell(row=row_num, column=col).fill = RED_FILL
+                duplicate_ip_count += 1
+                
+                if is_duplicate_ip_diff_mac:
+                    # Also highlight previous entries with same IP but different MAC
+                    for prev_row, prev_mac in written_ips[ip_address]:
+                        if prev_mac != mac:
+                            for col in range(1, 6):
+                                ws.cell(row=prev_row, column=col).fill = RED_FILL
+                    
+                    print(f"  RED: Duplicate IP {ip_address} with different MAC:")
+                    print(f"    - Current MAC: {original_mac}")
+                    print(f"    - Camera: {camera_name}")
+                
+                if is_same_mac_diff_ip:
+                    # Also highlight previous entries with same MAC but different IP
+                    for prev_row, prev_name, prev_ip in written_macs[mac]:
+                        if prev_ip and prev_ip != ip_address:
+                            for col in range(1, 6):
+                                ws.cell(row=prev_row, column=col).fill = RED_FILL
+                    
+                    print(f"  RED: Same MAC {original_mac} with different IP:")
+                    print(f"    - Current IP: {ip_address}")
+                    print(f"    - Camera: {camera_name}")
+                
+            elif is_duplicate_mac:
+                # Duplicate MAC with same IP (same camera, different names) - LIGHT BLUE
                 for col in range(1, 6):
                     ws.cell(row=row_num, column=col).fill = LIGHTBLUE_FILL
                 duplicate_mac_count += 1
@@ -155,7 +214,7 @@ def main():
                 print(f"    - Previous: {prev_entries[-1][1]}")
                 print(f"    - Current:  {camera_name}")
                 # Also highlight the previous entries
-                for prev_row, prev_name in prev_entries:
+                for prev_row, prev_name, prev_ip in prev_entries:
                     for col in range(1, 6):
                         ws.cell(row=prev_row, column=col).fill = LIGHTBLUE_FILL
             
@@ -164,7 +223,14 @@ def main():
                 used_macs.add(mac)
                 if mac not in written_macs:
                     written_macs[mac] = []
-                written_macs[mac].append((row_num, camera_name))
+                written_macs[mac].append((row_num, camera_name, ip_address))
+            
+            # Track IPs
+            if ip_address:
+                if ip_address not in written_ips:
+                    written_ips[ip_address] = []
+                written_ips[ip_address].append((row_num, mac))
+                
         else:
             # Write partial data - have name but no switch info (highlight ORANGE)
             ws.cell(row=row_num, column=1, value=camera_name)
@@ -173,18 +239,48 @@ def main():
             ws.cell(row=row_num, column=4, value='NOT FOUND')
             ws.cell(row=row_num, column=5, value='NOT FOUND')
             
-            # Highlight the entire row in ORANGE
-            for col in range(1, 6):
-                ws.cell(row=row_num, column=col).fill = ORANGE_FILL
+            # Check for network conflicts even without switch info
+            if is_duplicate_ip_diff_mac or is_same_mac_diff_ip:
+                # RED takes priority over ORANGE
+                for col in range(1, 6):
+                    ws.cell(row=row_num, column=col).fill = RED_FILL
+                duplicate_ip_count += 1
+                
+                if is_duplicate_ip_diff_mac:
+                    for prev_row, prev_mac in written_ips[ip_address]:
+                        if prev_mac != mac:
+                            for col in range(1, 6):
+                                ws.cell(row=prev_row, column=col).fill = RED_FILL
+                    
+                    print(f"  RED: Duplicate IP {ip_address} with different MAC (no switch info):")
+                    print(f"    - Current MAC: {original_mac}")
+                
+                if is_same_mac_diff_ip:
+                    for prev_row, prev_name, prev_ip in written_macs[mac]:
+                        if prev_ip and prev_ip != ip_address:
+                            for col in range(1, 6):
+                                ws.cell(row=prev_row, column=col).fill = RED_FILL
+                    
+                    print(f"  RED: Same MAC {original_mac} with different IP (no switch info):")
+                    print(f"    - Current IP: {ip_address}")
+            else:
+                # Highlight the entire row in ORANGE
+                for col in range(1, 6):
+                    ws.cell(row=row_num, column=col).fill = ORANGE_FILL
             
             no_switch_info_count += 1
             print(f"  ORANGE: No switch info found for {camera_name} (MAC: {original_mac})")
             
-            # Track written MACs even if no switch info found
+            # Track written MACs and IPs even if no switch info found
             if mac:
                 if mac not in written_macs:
                     written_macs[mac] = []
-                written_macs[mac].append((row_num, camera_name))
+                written_macs[mac].append((row_num, camera_name, ip_address))
+            
+            if ip_address:
+                if ip_address not in written_ips:
+                    written_ips[ip_address] = []
+                written_ips[ip_address].append((row_num, mac))
         
         row_num += 1
     
@@ -222,6 +318,7 @@ def main():
     print(f"⚠  ORANGE - Have name but no switch info: {no_switch_info_count}")
     print(f"⚠  YELLOW - Have switch info but no name: {no_name_info_count}")
     print(f"⚠  LIGHT BLUE - Duplicate MAC (same camera, different names): {duplicate_mac_count}")
+    print(f"⚠  RED - Duplicate IP with different MACs (IP CONFLICT): {duplicate_ip_count}")
     print(f"\nTotal rows written: {row_num - 2}")
     print(f"\nOutput saved to: {OUTPUT_EXCEL}")
     print("\nColor coding:")
@@ -229,9 +326,13 @@ def main():
     print("  - ORANGE: Camera name found but no switch info")
     print("  - YELLOW: Switch info found but no camera name")
     print("  - LIGHT BLUE: Same MAC/IP with different names (needs reconciliation)")
-    print("\nNOTE: Light blue entries indicate the same physical camera")
-    print("      appears with multiple names in the directory report.")
-    print("      Review these entries to determine the correct name.")
+    print("  - RED: Network conflict (CRITICAL!)")
+    print("      * Same IP with different MACs, OR")
+    print("      * Same MAC with different IPs")
+    print("\nNOTE: Red entries indicate network configuration errors:")
+    print("      - Same IP/different MACs: Multiple cameras sharing one IP")
+    print("      - Same MAC/different IPs: One camera with multiple IPs")
+    print("      Both scenarios will cause connectivity problems and need immediate attention!")
     print("="*60)
 
 if __name__ == "__main__":
