@@ -11,6 +11,19 @@ def is_aggregate_switch(hostname):
     """Check if a switch is an aggregate switch based on hostname."""
     return 'SMSAGG' in hostname.upper()
 
+def clean_hostname(hostname):
+    """
+    Clean hostname by removing .CAM.INT or other domain suffixes if present.
+    Returns the base hostname.
+    """
+    if not hostname:
+        return hostname
+    # Remove common domain suffixes
+    for suffix in ['.CAM.INT', '.cam.int', '.local']:
+        if hostname.endswith(suffix):
+            return hostname[:-len(suffix)]
+    return hostname
+
 def format_aggregate_uplinks(neighbors):
     """
     Format aggregate switch uplinks intelligently.
@@ -22,15 +35,15 @@ def format_aggregate_uplinks(neighbors):
     for neighbor in neighbors:
         neighbor_hostname = neighbor.get('neighbor_hostname', '')
         if is_aggregate_switch(neighbor_hostname):
-            # Extract short name for aggregate switch
-            agg_name = neighbor_hostname.split('.')[0].split('-')[-1] if '.' in neighbor_hostname else neighbor_hostname
+            # Use the cleaned full hostname as the key and display name
+            clean_name = clean_hostname(neighbor_hostname)
             
             connection_info = {
                 'local_port': neighbor.get('local_interface', 'Unknown'),
                 'remote_port': neighbor.get('remote_interface', 'Unknown'),
-                'agg_full_name': neighbor_hostname
+                'agg_full_name': clean_name
             }
-            agg_connections[agg_name].append(connection_info)
+            agg_connections[clean_name].append(connection_info)
     
     if not agg_connections:
         return "", ""
@@ -39,19 +52,19 @@ def format_aggregate_uplinks(neighbors):
     agg_names = []
     uplink_details = []
     
-    for agg_name, connections in sorted(agg_connections.items()):
-        agg_names.append(agg_name)
+    for agg_hostname, connections in sorted(agg_connections.items()):
+        agg_names.append(agg_hostname)
         
         if len(connections) == 1:
             # Single connection
             conn = connections[0]
-            uplink_details.append(f"On {agg_name}: Local {conn['local_port']} -> Remote {conn['remote_port']}")
+            uplink_details.append(f"On {agg_hostname}: Local {conn['local_port']} -> Remote {conn['remote_port']}")
         else:
             # Multiple connections to same aggregate
             ports_info = []
             for idx, conn in enumerate(connections, 1):
                 ports_info.append(f"Link {idx}: Local {conn['local_port']} -> Remote {conn['remote_port']}")
-            uplink_details.append(f"On {agg_name}: {'; '.join(ports_info)}")
+            uplink_details.append(f"On {agg_hostname}: {'; '.join(ports_info)}")
     
     aggregate_switch_str = " and ".join(agg_names)
     uplink_port_str = " | ".join(uplink_details)
@@ -65,17 +78,19 @@ def format_aggregate_to_aggregate_uplinks(neighbors, current_hostname):
     """
     agg_connections = []
     
+    # Clean the current hostname for comparison
+    clean_current = clean_hostname(current_hostname)
+    
     for neighbor in neighbors:
         neighbor_hostname = neighbor.get('neighbor_hostname', '')
-        if is_aggregate_switch(neighbor_hostname) and neighbor_hostname != current_hostname:
-            # Extract short name
-            peer_agg_name = neighbor_hostname.split('.')[0].split('-')[-1] if '.' in neighbor_hostname else neighbor_hostname
-            
+        clean_neighbor = clean_hostname(neighbor_hostname)
+        
+        if is_aggregate_switch(neighbor_hostname) and clean_neighbor != clean_current:
             local_port = neighbor.get('local_interface', 'Unknown')
             remote_port = neighbor.get('remote_interface', 'Unknown')
             
             agg_connections.append({
-                'peer': peer_agg_name,
+                'peer': clean_neighbor,
                 'local_port': local_port,
                 'remote_port': remote_port
             })
@@ -83,7 +98,7 @@ def format_aggregate_to_aggregate_uplinks(neighbors, current_hostname):
     if not agg_connections:
         return "", ""
     
-    # Group by peer
+    # Group by peer hostname
     peer_groups = defaultdict(list)
     for conn in agg_connections:
         peer_groups[conn['peer']].append(conn)
@@ -91,17 +106,17 @@ def format_aggregate_to_aggregate_uplinks(neighbors, current_hostname):
     agg_names = []
     uplink_details = []
     
-    for peer, connections in sorted(peer_groups.items()):
-        agg_names.append(peer)
+    for peer_hostname, connections in sorted(peer_groups.items()):
+        agg_names.append(peer_hostname)
         
         if len(connections) == 1:
             conn = connections[0]
-            uplink_details.append(f"{peer}: Local {conn['local_port']} <-> Remote {conn['remote_port']}")
+            uplink_details.append(f"{peer_hostname}: Local {conn['local_port']} <-> Remote {conn['remote_port']}")
         else:
             ports_info = []
             for idx, conn in enumerate(connections, 1):
                 ports_info.append(f"Link {idx}: Local {conn['local_port']} <-> Remote {conn['remote_port']}")
-            uplink_details.append(f"{peer}: {'; '.join(ports_info)}")
+            uplink_details.append(f"{peer_hostname}: {'; '.join(ports_info)}")
     
     aggregate_switch_str = " and ".join(agg_names)
     uplink_port_str = " | ".join(uplink_details)
@@ -173,7 +188,7 @@ def populate_excel_tracker(json_file, excel_file, output_file):
 if __name__ == "__main__":
     # File paths
     json_file = "network_topology.json"
-    excel_file = "PHX-MSA1A-camera_switch_tracker.xlsx"
+    excel_file = "PHXMSA1Acamera_switch_tracker.xlsx"
     output_file = "PHXMSA1Acamera_switch_tracker_populated.xlsx"
     
     # Populate the tracker
