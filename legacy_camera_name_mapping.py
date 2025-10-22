@@ -9,7 +9,7 @@ from openpyxl.styles import PatternFill
 # ============================================================================
 
 # Input files
-CAMERA_INVENTORY_JSON = 'camera_inventory_781cameras_2aggs_20251016_114305.json'
+CAMERA_INVENTORY_JSON = 'camera_inventory_1006cameras_20251021_110632.json'
 DIRECTORY_REPORT_EXCEL = 'sln4a_directory_report.xlsx'
 TRACKER_EXCEL = 'camera-switch-tracker-template.xlsx'
 
@@ -28,33 +28,31 @@ DIR_COL_DEVICE_STATUS = 'Device Status'
 
 # ============================================================================
 
-def normalize_mac(mac_address):
-    """Normalize MAC address format to uppercase with colons"""
+def normalize_mac_for_comparison(mac_address):
+    """Normalize MAC address ONLY for comparison purposes - removes separators and uppercases"""
     if pd.isna(mac_address) or mac_address == '':
         return None
     
-    # Convert to string and handle numeric MAC addresses
-    mac = str(mac_address).upper()
+    # Convert to string and uppercase
+    mac = str(mac_address).upper().strip()
     
-    # Remove any separators
-    mac = mac.replace(':', '').replace('-', '').replace('.', '').replace(' ', '')
+    # Remove any separators for comparison only
+    mac_clean = mac.replace(':', '').replace('-', '').replace('.', '').replace(' ', '')
     
-    # Handle numeric MAC addresses (like 1808007113)
     # Pad with zeros if less than 12 characters
-    if len(mac) < 12:
-        mac = mac.zfill(12)
+    if len(mac_clean) < 12:
+        mac_clean = mac_clean.zfill(12)
     
     # Take only first 12 characters if longer
-    mac = mac[:12]
+    mac_clean = mac_clean[:12]
     
     # Validate it's hexadecimal
     try:
-        int(mac, 16)
+        int(mac_clean, 16)
     except ValueError:
         return None
     
-    # Add colons back in standard format
-    return ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+    return mac_clean
 
 # Define highlight colors
 YELLOW_FILL = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')  # No name found
@@ -87,19 +85,35 @@ def main():
             print(f"Seed switch: {metadata.get('seed_switch', 'N/A')}")
             print(f"Total cameras found: {metadata.get('total_cameras', len(camera_inventory))}")
             print(f"Total aggregates scanned: {metadata.get('total_aggregates', 'N/A')}")
-            
-            if 'aggregates' in metadata:
-                print(f"\nAggregates discovered:")
-                for agg in metadata['aggregates']:
-                    seed_marker = " (SEED)" if agg.get('is_seed') else ""
-                    print(f"  - {agg.get('hostname', 'Unknown'):<40} {agg.get('ip')}{seed_marker}")
             print("="*60 + "\n")
+            
+            # Print discovery statistics if available
+            if 'discovery_statistics' in camera_inventory_data:
+                stats = camera_inventory_data['discovery_statistics']
+                print("DISCOVERY STATISTICS")
+                print("="*60)
+                print(f"Switches attempted: {stats.get('switches_attempted', 'N/A')}")
+                print(f"Switches successfully scanned: {stats.get('switches_successfully_scanned', 'N/A')}")
+                print(f"Switches failed: {stats.get('switches_failed_other', 0)}")
+                
+                if 'switches_by_type' in stats:
+                    print("\nSwitches by type:")
+                    for switch_type, type_stats in stats['switches_by_type'].items():
+                        print(f"  {switch_type}:")
+                        print(f"    - Attempted: {type_stats.get('attempted', 0)}")
+                        print(f"    - Successful: {type_stats.get('successful', 0)}")
+                        print(f"    - Failed: {type_stats.get('failed', 0)}")
+                
+                if 'failure_details' in stats and stats['failure_details']:
+                    print("\nFailed switches:")
+                    for failure in stats['failure_details']:
+                        print(f"  - {failure.get('switch_name', 'Unknown')}: {failure.get('reason', 'Unknown reason')}")
+                
+                print("="*60 + "\n")
         else:
             # Dict but no 'cameras' key - might be old format stored as dict
-            # Check if it has expected fields
             first_key = list(camera_inventory_data.keys())[0] if camera_inventory_data else None
             if first_key and isinstance(camera_inventory_data[first_key], dict):
-                # It's a dict of cameras (unusual format)
                 camera_inventory = list(camera_inventory_data.values())
             else:
                 print("ERROR: Unexpected JSON structure")
@@ -112,19 +126,24 @@ def main():
         print(f"ERROR: Unexpected data type in JSON: {type(camera_inventory_data)}")
         return
     
-    # Create a dictionary with MAC address as key
+    # Create a dictionary with MAC address as key (for comparison) but store original MAC
     inventory_dict = {}
     switch_type_stats = {}
     
     for entry in camera_inventory:
-        mac = normalize_mac(entry['mac_address'])
-        if mac:
+        # Keep original MAC address format from JSON
+        original_mac = entry['mac_address']
+        # Create comparison key (normalized)
+        mac_key = normalize_mac_for_comparison(original_mac)
+        
+        if mac_key:
             switch_type = entry.get('switch_type', 'UNKNOWN')
-            inventory_dict[mac] = {
+            inventory_dict[mac_key] = {
                 'switch_name': entry['switch_name'],
                 'switch_type': switch_type,
                 'port': entry['port'],
-                'vlan': entry.get('vlan', '')
+                'vlan': entry.get('vlan', ''),
+                'original_mac': original_mac  # Store original format
             }
             # Track statistics by switch type
             switch_type_stats[switch_type] = switch_type_stats.get(switch_type, 0) + 1
@@ -148,7 +167,6 @@ def main():
         print(f"  - {repr(col)}")
     
     # IMPORTANT: We only filter out formatting/status rows, NOT duplicate cameras
-    # Duplicate cameras (same MAC/IP, different names) are kept intentionally
     original_count = len(directory_df)
     
     # Remove rows where camera name is NaN or empty (these are formatting rows)
@@ -161,14 +179,16 @@ def main():
     print(f"Filtered out {removed_count} empty/status formatting rows")
     print(f"Processing {filtered_count} camera records (including duplicates)")
     
+    # Create comparison key for MACs in directory (for matching only)
+    directory_df['MAC_comparison_key'] = directory_df[DIR_COL_MAC_ADDRESS].apply(normalize_mac_for_comparison)
+    
     # Check for duplicate MACs to inform user
-    directory_df['MAC_normalized'] = directory_df[DIR_COL_MAC_ADDRESS].apply(normalize_mac)
-    duplicate_macs = directory_df[directory_df['MAC_normalized'].notna()].duplicated(subset=['MAC_normalized'], keep=False).sum()
+    duplicate_macs = directory_df[directory_df['MAC_comparison_key'].notna()].duplicated(subset=['MAC_comparison_key'], keep=False).sum()
     if duplicate_macs > 0:
         print(f"Note: Found {duplicate_macs} rows with duplicate MAC addresses (will be highlighted in light blue)")
     
     # Check for duplicate IPs with different MACs
-    ip_groups = directory_df[directory_df[DIR_COL_IP_ADDRESS].notna()].groupby(DIR_COL_IP_ADDRESS)['MAC_normalized'].nunique()
+    ip_groups = directory_df[directory_df[DIR_COL_IP_ADDRESS].notna()].groupby(DIR_COL_IP_ADDRESS)['MAC_comparison_key'].nunique()
     duplicate_ips = (ip_groups > 1).sum()
     if duplicate_ips > 0:
         print(f"WARNING: Found {duplicate_ips} IP addresses shared by different MAC addresses (will be highlighted in RED)")
@@ -195,25 +215,25 @@ def main():
     used_macs = set()
     
     # Track MACs we've already written to detect duplicates
-    written_macs = {}  # mac -> list of (row_num, camera_name, ip_address)
+    written_macs = {}  # mac_key -> list of (row_num, camera_name, ip_address)
     
     # Track IPs we've already written to detect IP duplicates with different MACs
-    written_ips = {}  # ip -> list of (row_num, mac_address)
+    written_ips = {}  # ip -> list of (row_num, mac_key)
     
     # First pass: Process all cameras from directory report
     for idx, cam_row in directory_df.iterrows():
-        mac = cam_row['MAC_normalized']
+        mac_key = cam_row['MAC_comparison_key']
         camera_name = cam_row[DIR_COL_CAMERA_NAME]
         ip_address = cam_row[DIR_COL_IP_ADDRESS]
-        original_mac = cam_row[DIR_COL_MAC_ADDRESS]
+        original_mac_from_dir = cam_row[DIR_COL_MAC_ADDRESS]
         
         # Check if this MAC was already written (duplicate detection)
-        is_duplicate_mac = mac in written_macs if mac else False
+        is_duplicate_mac = mac_key in written_macs if mac_key else False
         
         # Check if this MAC has a DIFFERENT IP than previous entries
         is_same_mac_diff_ip = False
         if is_duplicate_mac and ip_address:
-            for prev_row, prev_name, prev_ip in written_macs[mac]:
+            for prev_row, prev_name, prev_ip in written_macs[mac_key]:
                 if prev_ip and prev_ip != ip_address:
                     is_same_mac_diff_ip = True
                     break
@@ -222,17 +242,19 @@ def main():
         is_duplicate_ip_diff_mac = False
         if ip_address and ip_address in written_ips:
             for prev_row, prev_mac in written_ips[ip_address]:
-                if prev_mac != mac:
+                if prev_mac != mac_key:
                     is_duplicate_ip_diff_mac = True
                     break
         
-        # Look up switch info from inventory
-        switch_info = inventory_dict.get(mac)
+        # Look up switch info from inventory using comparison key
+        switch_info = inventory_dict.get(mac_key)
         
         if switch_info:
             # Write to Excel - fully matched
             ws.cell(row=row_num, column=1, value=camera_name)
-            ws.cell(row=row_num, column=2, value=str(original_mac))
+            # IMPORTANT: Force MAC to be text by setting number_format
+            mac_cell = ws.cell(row=row_num, column=2, value=str(original_mac_from_dir))
+            mac_cell.number_format = '@'  # '@' means text format in Excel
             ws.cell(row=row_num, column=3, value=str(ip_address))
             
             # Enhanced: Include switch type in the switch name display
@@ -250,21 +272,21 @@ def main():
                 
                 if is_duplicate_ip_diff_mac:
                     for prev_row, prev_mac in written_ips[ip_address]:
-                        if prev_mac != mac:
+                        if prev_mac != mac_key:
                             for col in range(1, 6):
                                 ws.cell(row=prev_row, column=col).fill = RED_FILL
                     
                     print(f"  RED: Duplicate IP {ip_address} with different MAC:")
-                    print(f"    - Current MAC: {original_mac}")
+                    print(f"    - Current MAC: {original_mac_from_dir}")
                     print(f"    - Camera: {camera_name}")
                 
                 if is_same_mac_diff_ip:
-                    for prev_row, prev_name, prev_ip in written_macs[mac]:
+                    for prev_row, prev_name, prev_ip in written_macs[mac_key]:
                         if prev_ip and prev_ip != ip_address:
                             for col in range(1, 6):
                                 ws.cell(row=prev_row, column=col).fill = RED_FILL
                     
-                    print(f"  RED: Same MAC {original_mac} with different IP:")
+                    print(f"  RED: Same MAC {original_mac_from_dir} with different IP:")
                     print(f"    - Current IP: {ip_address}")
                     print(f"    - Camera: {camera_name}")
                 
@@ -273,8 +295,8 @@ def main():
                 for col in range(1, 6):
                     ws.cell(row=row_num, column=col).fill = LIGHTBLUE_FILL
                 duplicate_mac_count += 1
-                prev_entries = written_macs[mac]
-                print(f"  LIGHT BLUE: Duplicate MAC {original_mac} found:")
+                prev_entries = written_macs[mac_key]
+                print(f"  LIGHT BLUE: Duplicate MAC {original_mac_from_dir} found:")
                 print(f"    - Previous: {prev_entries[-1][1]}")
                 print(f"    - Current:  {camera_name}")
                 # Also highlight the previous entries
@@ -283,22 +305,24 @@ def main():
                         ws.cell(row=prev_row, column=col).fill = LIGHTBLUE_FILL
             
             matched_count += 1
-            if mac:
-                used_macs.add(mac)
-                if mac not in written_macs:
-                    written_macs[mac] = []
-                written_macs[mac].append((row_num, camera_name, ip_address))
+            if mac_key:
+                used_macs.add(mac_key)
+                if mac_key not in written_macs:
+                    written_macs[mac_key] = []
+                written_macs[mac_key].append((row_num, camera_name, ip_address))
             
             # Track IPs
             if ip_address:
                 if ip_address not in written_ips:
                     written_ips[ip_address] = []
-                written_ips[ip_address].append((row_num, mac))
+                written_ips[ip_address].append((row_num, mac_key))
                 
         else:
             # Write partial data - have name but no switch info (highlight ORANGE)
             ws.cell(row=row_num, column=1, value=camera_name)
-            ws.cell(row=row_num, column=2, value=str(original_mac))
+            # IMPORTANT: Force MAC to be text
+            mac_cell = ws.cell(row=row_num, column=2, value=str(original_mac_from_dir))
+            mac_cell.number_format = '@'
             ws.cell(row=row_num, column=3, value=str(ip_address))
             ws.cell(row=row_num, column=4, value='NOT FOUND')
             ws.cell(row=row_num, column=5, value='NOT FOUND')
@@ -312,20 +336,20 @@ def main():
                 
                 if is_duplicate_ip_diff_mac:
                     for prev_row, prev_mac in written_ips[ip_address]:
-                        if prev_mac != mac:
+                        if prev_mac != mac_key:
                             for col in range(1, 6):
                                 ws.cell(row=prev_row, column=col).fill = RED_FILL
                     
                     print(f"  RED: Duplicate IP {ip_address} with different MAC (no switch info):")
-                    print(f"    - Current MAC: {original_mac}")
+                    print(f"    - Current MAC: {original_mac_from_dir}")
                 
                 if is_same_mac_diff_ip:
-                    for prev_row, prev_name, prev_ip in written_macs[mac]:
+                    for prev_row, prev_name, prev_ip in written_macs[mac_key]:
                         if prev_ip and prev_ip != ip_address:
                             for col in range(1, 6):
                                 ws.cell(row=prev_row, column=col).fill = RED_FILL
                     
-                    print(f"  RED: Same MAC {original_mac} with different IP (no switch info):")
+                    print(f"  RED: Same MAC {original_mac_from_dir} with different IP (no switch info):")
                     print(f"    - Current IP: {ip_address}")
             else:
                 # Highlight the entire row in ORANGE
@@ -333,28 +357,30 @@ def main():
                     ws.cell(row=row_num, column=col).fill = ORANGE_FILL
             
             no_switch_info_count += 1
-            print(f"  ORANGE: No switch info found for {camera_name} (MAC: {original_mac})")
+            print(f"  ORANGE: No switch info found for {camera_name} (MAC: {original_mac_from_dir})")
             
             # Track written MACs and IPs even if no switch info found
-            if mac:
-                if mac not in written_macs:
-                    written_macs[mac] = []
-                written_macs[mac].append((row_num, camera_name, ip_address))
+            if mac_key:
+                if mac_key not in written_macs:
+                    written_macs[mac_key] = []
+                written_macs[mac_key].append((row_num, camera_name, ip_address))
             
             if ip_address:
                 if ip_address not in written_ips:
                     written_ips[ip_address] = []
-                written_ips[ip_address].append((row_num, mac))
+                written_ips[ip_address].append((row_num, mac_key))
         
         row_num += 1
     
     # Second pass: Add cameras from inventory that don't have names (not in directory report)
     print("\nChecking for cameras in inventory without names...")
-    for mac, switch_info in inventory_dict.items():
-        if mac not in used_macs:
+    for mac_key, switch_info in inventory_dict.items():
+        if mac_key not in used_macs:
             # This MAC has switch info but no camera name (highlight YELLOW)
             ws.cell(row=row_num, column=1, value='NAME NOT FOUND')
-            ws.cell(row=row_num, column=2, value=mac)
+            # IMPORTANT: Force MAC to be text - use the original MAC format from JSON
+            mac_cell = ws.cell(row=row_num, column=2, value=switch_info['original_mac'])
+            mac_cell.number_format = '@'
             ws.cell(row=row_num, column=3, value='')
             
             # Include switch type in display
@@ -368,7 +394,7 @@ def main():
                 ws.cell(row=row_num, column=col).fill = YELLOW_FILL
             
             no_name_info_count += 1
-            print(f"  YELLOW: No camera name found for MAC: {mac} on {switch_info['switch_name']} [{switch_type}] port {switch_info['port']}")
+            print(f"  YELLOW: No camera name found for MAC: {switch_info['original_mac']} on {switch_info['switch_name']} [{switch_type}] port {switch_info['port']}")
             
             row_num += 1
     
