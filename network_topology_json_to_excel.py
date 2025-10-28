@@ -188,8 +188,8 @@ def populate_excel_tracker(json_file, excel_file, output_file):
 if __name__ == "__main__":
     # File paths
     json_file = "network_topology.json"
-    excel_file = "PHXMSA1Acamera_switch_tracker.xlsx"
-    output_file = "PHXMSA1Acamera_switch_tracker_populated.xlsx"
+    excel_file = "camera-switch-tracker-template.xlsx"
+    output_file = "camera-switch-tracker-template.xlsx"
     
     # Populate the tracker
     populate_excel_tracker(json_file, excel_file, output_file)
