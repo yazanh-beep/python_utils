@@ -18,7 +18,7 @@ DIRECTORY_SHEET_NAME = 'Sheet1'
 TRACKER_CAMERA_SHEET = 'camera'
 
 # Output file
-OUTPUT_EXCEL = 'switch_camera_tracker_UPDATED.xlsx'
+OUTPUT_EXCEL = 'switch_camera_tracker.xlsx'
 
 # Column names in directory report (adjust if your Excel has different column names)
 DIR_COL_CAMERA_NAME = 'Camera stream name'
