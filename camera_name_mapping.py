@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill
 # Input files
 CAMERA_INVENTORY_JSON = 'camera_inventory_781cameras_2aggs_20251016_114305.json'
 DIRECTORY_REPORT_EXCEL = 'directory_report.xlsx'
-TRACKER_EXCEL = 'camera-switch-tracker-template.xlsx'
+TRACKER_EXCEL = 'camera-switch-tracker.xlsx'
 
 # Sheet names
 DIRECTORY_SHEET_NAME = 'Sheet1'
