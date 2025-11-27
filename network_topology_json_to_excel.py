@@ -189,7 +189,7 @@ if __name__ == "__main__":
     # File paths
     json_file = "network_topology.json"
     excel_file = "camera-switch-tracker-template.xlsx"
-    output_file = "camera-switch-tracker-template.xlsx"
+    output_file = "camera-switch-tracker.xlsx"
     
     # Populate the tracker
     populate_excel_tracker(json_file, excel_file, output_file)
