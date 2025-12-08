@@ -1,7 +1,7 @@
 import ipaddress
 import sys
 from typing import List, Dict, Any, Tuple
-import pandas as pd 
+import pandas as pd
 
 # --- Configuration for Subnetting Scheme ---
 NUM_BLDGS_BASE = 10 
@@ -92,7 +92,7 @@ MASTER_PLAN = [
 
 EMPTY_ROW_TEMPLATE = {
     "Building": "", "Assigned Equipment": "", "Network Address": "", 
-    "Assigned IP Range": "", "CIDR": "", "Usable Hosts": "",
+    "Assigned IP Range": "", "CIDR": "", "Hosts": "",
     "Subnet Mask": "", "SVI GATEWAY": ""
 }
 
@@ -334,25 +334,33 @@ def generate_ip_allocation(master_network_str: str, plan: List[Dict[str, Any]]) 
                      row['Building'] = f"{carving_name} - Range Not Determined"
 
 
-        # Clean up temporary keys and add to final results list
-        cleaned_row = {k: v for k, v in row.items() if k not in ['is_range_placeholder', 'carving_name', 'allocation_start_index', 'base_block', 'aggregate_network', 'carving_label', 'target_count', 'target_cidr']}
-        # final_results is undefined here, should use allocation_results directly but clean up in place
-        pass # Doing in-place modification of 'row' dict, keys removed above.
-
     # Final Cleanup of carving_label in all rows
     final_results = []
     for row in allocation_results:
-        cleaned = {k:v for k,v in row.items() if k != 'carving_label'}
+        # We strip out the internal tracking keys before export
+        cleaned = {k:v for k,v in row.items() if k not in [
+            'carving_label', 'is_range_placeholder', 'carving_name', 
+            'allocation_start_index', 'base_block', 'aggregate_network'
+        ]}
         final_results.append(cleaned)
         
     return final_results, current_network_address
 
 def create_summary_rows(master_network, results, next_ip):
     summary = []
-    # Row 1
+    # Calculate the full usable range for the master block
     m_range = f"{master_network.network_address + 1} - {master_network.broadcast_address - 1}"
+    
     row1 = EMPTY_ROW_TEMPLATE.copy()
-    row1["Building"] = f"{master_network} - {m_range}"
+    
+    # --- UPDATED HEADER FOR /17 SPECIFICATION ---
+    row1["Building"] = "MASTER ALLOCATION PLAN"
+    row1["Network Address"] = str(master_network.network_address)
+    row1["Assigned IP Range"] = m_range
+    row1["CIDR"] = f"/{master_network.prefixlen}"
+    row1["Subnet Mask"] = str(master_network.netmask)
+    row1["Hosts"] = master_network.num_addresses - 2
+    
     summary.append(row1)
     summary.append(EMPTY_ROW_TEMPLATE.copy())
     return summary
@@ -360,6 +368,7 @@ def create_summary_rows(master_network, results, next_ip):
 def main():
     if len(sys.argv) < 2:
         print("Usage: python ip_planner.py <subnet>")
+        print("Example: python ip_planner.py 10.15.0.0/17")
         sys.exit(1)
         
     start_net = sys.argv[1]
@@ -396,10 +405,10 @@ def main():
                     building_val = str(row_data.get("Building", ""))
                     
                     is_header = False
-                    # Check for Range Headers or Column Headers
+                    # Check for Range Headers or Column Headers or Master Plan Header
                     if " - " in building_val and not row_data.get("Network Address"):
                          is_header = True
-                    elif building_val == "Building":
+                    elif building_val == "Building" or building_val == "MASTER ALLOCATION PLAN":
                         is_header = True
                     
                     # Loop through the first 8 columns (0-7)
