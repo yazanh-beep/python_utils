@@ -7,10 +7,6 @@ def load_json_data(json_file):
     with open(json_file, 'r') as f:
         return json.load(f)
 
-def is_aggregate_switch(hostname):
-    """Check if a switch is an aggregate switch based on hostname."""
-    return 'SMSAGG' in hostname.upper()
-
 def clean_hostname(hostname):
     """
     Clean hostname by removing .CAM.INT or other domain suffixes if present.
@@ -19,40 +15,59 @@ def clean_hostname(hostname):
     if not hostname:
         return hostname
     # Remove common domain suffixes
-    for suffix in ['.CAM.INT', '.cam.int', '.local']:
+    for suffix in ['.CAM.INT', '.cam.int', '.local', '.cisco.com']:
         if hostname.endswith(suffix):
             return hostname[:-len(suffix)]
     return hostname
 
-def format_aggregate_uplinks(neighbors):
+def is_valid_uplink(neighbor):
     """
-    Format aggregate switch uplinks intelligently.
-    Handles multiple uplinks to aggregate switches.
-    """
-    agg_connections = defaultdict(list)
+    Determines if a neighbor is a valid uplink/aggregate switch.
     
-    # Group connections by aggregate switch
+    Criteria:
+    1. Must have a Management IP (filters out dumb endpoints/cameras).
+    2. Must not be the same device (loopback check).
+    """
+    # In your data, cameras/endpoints have null management IPs. 
+    # Real switches have IPs.
+    if neighbor.get('neighbor_mgmt_ip'):
+        return True
+    return False
+
+def format_uplinks(neighbors, current_hostname):
+    """
+    Format switch uplinks. 
+    scans all neighbors and identifies any valid switch as an uplink.
+    """
+    uplink_connections = defaultdict(list)
+    clean_current = clean_hostname(current_hostname)
+    
     for neighbor in neighbors:
         neighbor_hostname = neighbor.get('neighbor_hostname', '')
-        if is_aggregate_switch(neighbor_hostname):
-            # Use the cleaned full hostname as the key and display name
+        
+        # LOGIC CHANGE: We simply check if it's a valid switch neighbor
+        if is_valid_uplink(neighbor):
             clean_name = clean_hostname(neighbor_hostname)
+            
+            # Avoid listing ourselves if the data contains loopbacks
+            if clean_name == clean_current:
+                continue
             
             connection_info = {
                 'local_port': neighbor.get('local_interface', 'Unknown'),
                 'remote_port': neighbor.get('remote_interface', 'Unknown'),
                 'agg_full_name': clean_name
             }
-            agg_connections[clean_name].append(connection_info)
+            uplink_connections[clean_name].append(connection_info)
     
-    if not agg_connections:
+    if not uplink_connections:
         return "", ""
     
     # Format the output
     agg_names = []
     uplink_details = []
     
-    for agg_hostname, connections in sorted(agg_connections.items()):
+    for agg_hostname, connections in sorted(uplink_connections.items()):
         agg_names.append(agg_hostname)
         
         if len(connections) == 1:
@@ -60,63 +75,11 @@ def format_aggregate_uplinks(neighbors):
             conn = connections[0]
             uplink_details.append(f"On {agg_hostname}: Local {conn['local_port']} -> Remote {conn['remote_port']}")
         else:
-            # Multiple connections to same aggregate
+            # Multiple connections to same switch (Port Channel / Redundant links)
             ports_info = []
             for idx, conn in enumerate(connections, 1):
                 ports_info.append(f"Link {idx}: Local {conn['local_port']} -> Remote {conn['remote_port']}")
             uplink_details.append(f"On {agg_hostname}: {'; '.join(ports_info)}")
-    
-    aggregate_switch_str = " and ".join(agg_names)
-    uplink_port_str = " | ".join(uplink_details)
-    
-    return aggregate_switch_str, uplink_port_str
-
-def format_aggregate_to_aggregate_uplinks(neighbors, current_hostname):
-    """
-    Special formatting for aggregate switches connecting to each other.
-    Shows the peer aggregate switch and the ports on both sides.
-    """
-    agg_connections = []
-    
-    # Clean the current hostname for comparison
-    clean_current = clean_hostname(current_hostname)
-    
-    for neighbor in neighbors:
-        neighbor_hostname = neighbor.get('neighbor_hostname', '')
-        clean_neighbor = clean_hostname(neighbor_hostname)
-        
-        if is_aggregate_switch(neighbor_hostname) and clean_neighbor != clean_current:
-            local_port = neighbor.get('local_interface', 'Unknown')
-            remote_port = neighbor.get('remote_interface', 'Unknown')
-            
-            agg_connections.append({
-                'peer': clean_neighbor,
-                'local_port': local_port,
-                'remote_port': remote_port
-            })
-    
-    if not agg_connections:
-        return "", ""
-    
-    # Group by peer hostname
-    peer_groups = defaultdict(list)
-    for conn in agg_connections:
-        peer_groups[conn['peer']].append(conn)
-    
-    agg_names = []
-    uplink_details = []
-    
-    for peer_hostname, connections in sorted(peer_groups.items()):
-        agg_names.append(peer_hostname)
-        
-        if len(connections) == 1:
-            conn = connections[0]
-            uplink_details.append(f"{peer_hostname}: Local {conn['local_port']} <-> Remote {conn['remote_port']}")
-        else:
-            ports_info = []
-            for idx, conn in enumerate(connections, 1):
-                ports_info.append(f"Link {idx}: Local {conn['local_port']} <-> Remote {conn['remote_port']}")
-            uplink_details.append(f"{peer_hostname}: {'; '.join(ports_info)}")
     
     aggregate_switch_str = " and ".join(agg_names)
     uplink_port_str = " | ".join(uplink_details)
@@ -131,25 +94,18 @@ def populate_excel_tracker(json_file, excel_file, output_file):
     topology_data = load_json_data(json_file)
     
     # Load Excel workbook
-    wb = openpyxl.load_workbook(excel_file)
-    
+    try:
+        wb = openpyxl.load_workbook(excel_file)
+    except FileNotFoundError:
+        print(f"Error: Could not find template file: {excel_file}")
+        return
+
     # Access the 'switch' sheet
     if 'switch' not in wb.sheetnames:
         print("Error: 'switch' sheet not found in workbook")
         return
     
     ws = wb['switch']
-    
-    # Expected headers (as seen in the file)
-    expected_headers = [
-        "Switch name",
-        "Serial Number",
-        "Management IP address",
-        "switch model",
-        "firmware",
-        "aggregate switch",
-        "uplink port on aggregate switch"
-    ]
     
     # Start writing from row 2 (row 1 has headers)
     current_row = 2
@@ -162,13 +118,8 @@ def populate_excel_tracker(json_file, excel_file, output_file):
         ios_version = device.get('ios_version', '')
         neighbors = device.get('neighbors', [])
         
-        # Determine aggregate switch and uplink information
-        if is_aggregate_switch(hostname):
-            # This is an aggregate switch
-            aggregate_switch, uplink_port = format_aggregate_to_aggregate_uplinks(neighbors, hostname)
-        else:
-            # This is a regular switch
-            aggregate_switch, uplink_port = format_aggregate_uplinks(neighbors)
+        # Unified logic: Just find the uplink(s)
+        aggregate_switch, uplink_port = format_uplinks(neighbors, hostname)
         
         # Write to Excel
         ws.cell(row=current_row, column=1, value=hostname)
@@ -193,5 +144,3 @@ if __name__ == "__main__":
     
     # Populate the tracker
     populate_excel_tracker(json_file, excel_file, output_file)
-    
-    print("\nDone! Check the output file for results.")
