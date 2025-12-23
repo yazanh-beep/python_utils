@@ -1,6 +1,8 @@
 import pandas as pd
 import json
 import openpyxl
+import glob  # Added for file pattern matching
+import os    # Added for checking file times
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
@@ -9,7 +11,7 @@ from openpyxl.styles import PatternFill
 # ============================================================================
 
 # Input files
-CAMERA_INVENTORY_JSON = 'camera_inventory_781cameras_2aggs_20251016_114305.json'
+# NOTE: CAMERA_INVENTORY_JSON is now determined dynamically in main()
 DIRECTORY_REPORT_EXCEL = 'directory_report.xlsx'
 TRACKER_EXCEL = 'camera-switch-tracker.xlsx'
 
@@ -43,10 +45,36 @@ ORANGE_FILL = PatternFill(start_color='FFA500', end_color='FFA500', fill_type='s
 LIGHTBLUE_FILL = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid')  # Duplicate MAC (same camera, different names)
 RED_FILL = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')  # Duplicate IP with different MAC
 
+def get_inventory_file():
+    """Finds the most recent file starting with camera_inventory ending in .json"""
+    # Look for any JSON file starting with camera_inventory
+    files = glob.glob('camera_inventory*.json')
+    
+    if not files:
+        return None
+    
+    # Sort by modification time, newest last
+    latest_file = max(files, key=os.path.getmtime)
+    return latest_file
+
 def main():
+    # ---------------------------------------------------------
+    # DYNAMIC FILE LOADING LOGIC
+    # ---------------------------------------------------------
+    print("Searching for inventory file...")
+    camera_inventory_json = get_inventory_file()
+    
+    if not camera_inventory_json:
+        print("CRITICAL ERROR: No file found starting with 'camera_inventory' and ending in '.json'")
+        print("Please ensure the JSON file is in the same folder as this script.")
+        return
+
+    print(f"✓ Found and using: {camera_inventory_json}")
+    # ---------------------------------------------------------
+
     # Read the JSON file with camera inventory (switch info)
-    print(f"Reading {CAMERA_INVENTORY_JSON}...")
-    with open(CAMERA_INVENTORY_JSON, 'r') as f:
+    print(f"Reading {camera_inventory_json}...")
+    with open(camera_inventory_json, 'r') as f:
         camera_inventory_data = json.load(f)
     
     # Debug: Print the type and keys to understand the structure
@@ -84,7 +112,7 @@ def main():
                 camera_inventory = list(camera_inventory_data.values())
             else:
                 print("ERROR: Unexpected JSON structure")
-                print(f"Please check the format of {CAMERA_INVENTORY_JSON}")
+                print(f"Please check the format of {camera_inventory_json}")
                 return
     elif isinstance(camera_inventory_data, list):
         # Old format - just a list
