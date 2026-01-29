@@ -31,13 +31,19 @@ DIR_COL_EXPORTER = 'Exporter name'
 def normalize_mac(mac_address):
     if pd.isna(mac_address) or mac_address == '':
         return None
-    mac = str(mac_address).upper().replace(':', '').replace('-', '').replace('.', '')
-    return ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+    # Remove any separators and spaces, convert to uppercase
+    mac = str(mac_address).upper().replace(':', '').replace('-', '').replace('.', '').replace(' ', '')
+    try:
+        # Reformat to XX:XX:XX:XX:XX:XX
+        return ':'.join([mac[i:i+2] for i in range(0, len(mac), 2)])
+    except:
+        return str(mac_address)
 
-YELLOW_FILL = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
-ORANGE_FILL = PatternFill(start_color='FFA500', end_color='FFA500', fill_type='solid')
-LIGHTBLUE_FILL = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid')
-RED_FILL = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
+# Define Highlight Colors
+YELLOW_FILL = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')  # Inventory only
+ORANGE_FILL = PatternFill(start_color='FFA500', end_color='FFA500', fill_type='solid')  # No switch info
+LIGHTBLUE_FILL = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid') # Duplicate MAC
+RED_FILL = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')       # IP Conflict
 
 def get_inventory_file():
     files = glob.glob('camera_inventory*.json')
@@ -47,6 +53,9 @@ def get_inventory_file():
     return latest_file
 
 def main():
+    # FIX: Declare global at the very start of the function
+    global DIR_COL_EXPORTER 
+
     print("Searching for inventory file...")
     camera_inventory_json = get_inventory_file()
     
@@ -74,10 +83,25 @@ def main():
                 'port': entry['port']
             }
     
+    print(f"Loaded {len(inventory_dict)} unique MACs from inventory.")
+
     print(f"\nReading {DIRECTORY_REPORT_EXCEL}...")
-    directory_df = pd.read_excel(DIRECTORY_REPORT_EXCEL, sheet_name=DIRECTORY_SHEET_NAME)
+    # Force string type for MAC column to avoid scientific notation issues
+    directory_df = pd.read_excel(DIRECTORY_REPORT_EXCEL, sheet_name=DIRECTORY_SHEET_NAME, dtype={DIR_COL_MAC_ADDRESS: str})
     
-    # Filter formatting rows
+    # --- Clean column names to handle trailing whitespace ---
+    directory_df.columns = directory_df.columns.str.strip()
+    
+    # Debug: Check if columns exist
+    if DIR_COL_EXPORTER not in directory_df.columns:
+        print(f"⚠ WARNING: Column '{DIR_COL_EXPORTER}' not found. Found columns: {list(directory_df.columns)}")
+        # Try to find a close match or proceed without it
+        potential_match = next((c for c in directory_df.columns if 'Exporter' in c), None)
+        if potential_match:
+            print(f"✓ Using '{potential_match}' instead.")
+            DIR_COL_EXPORTER = potential_match
+    
+    # Filter out empty/formatting rows
     directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].notna()]
     directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].astype(str).str.strip() != '']
     
@@ -90,23 +114,26 @@ def main():
     # Clear existing data
     ws.delete_rows(2, ws.max_row)
     
-    row_num = 2
     used_macs = set()
     written_macs = {} 
-    written_ips = {}
+    
+    # Buffer to store all rows before writing (allows sorting)
+    # Structure: {'sort_key': (SwitchName, Port), 'data': [CellValues], 'color': FillObj}
+    rows_buffer = []
 
+    # --- PASS 1: Process Cameras from Directory Report ---
     for idx, cam_row in directory_df.iterrows():
         mac = cam_row['MAC_normalized']
         camera_name = cam_row[DIR_COL_CAMERA_NAME]
         ip_address = cam_row[DIR_COL_IP_ADDRESS]
         original_mac = cam_row[DIR_COL_MAC_ADDRESS]
         
-        # New data points
-        status = cam_row[DIR_COL_CAMERA_STATE]
-        location = cam_row[DIR_COL_LOCATION]
-        exporter = cam_row[DIR_COL_EXPORTER]
+        # Safely get columns
+        status = cam_row.get(DIR_COL_CAMERA_STATE, '')
+        location = cam_row.get(DIR_COL_LOCATION, '')
+        exporter = cam_row.get(DIR_COL_EXPORTER, '')
         
-        # Duplicate/Conflict detection logic
+        # Conflict detection
         is_duplicate_mac = mac in written_macs if mac else False
         is_same_mac_diff_ip = False
         if is_duplicate_mac and ip_address:
@@ -117,56 +144,87 @@ def main():
 
         switch_info = inventory_dict.get(mac)
         
-        # Write basic columns
-        ws.cell(row=row_num, column=1, value=camera_name)
-        ws.cell(row=row_num, column=2, value=original_mac)
-        ws.cell(row=row_num, column=3, value=ip_address)
+        row_data = [
+            camera_name,        # 1
+            original_mac,       # 2
+            ip_address,         # 3
+            "",                 # 4 (Switch)
+            "",                 # 5 (Port)
+            status,             # 6
+            location,           # 7
+            exporter            # 8
+        ]
         
-        # Write switch info if found
+        row_color = None
+        sort_key = ("ZZZ_NOT_FOUND", "ZZZ") # Default to bottom
+
         if switch_info:
             switch_display = f"{switch_info['switch_name']} [{switch_info['switch_type']}]"
-            ws.cell(row=row_num, column=4, value=switch_display)
-            ws.cell(row=row_num, column=5, value=switch_info['port'])
+            row_data[3] = switch_display
+            row_data[4] = switch_info['port']
+            sort_key = (switch_info['switch_name'], switch_info['port'])
             used_macs.add(mac)
         else:
-            ws.cell(row=row_num, column=4, value='NOT FOUND')
-            ws.cell(row=row_num, column=5, value='NOT FOUND')
-            for col in range(1, 9): # Highlight orange if no switch info
-                ws.cell(row=row_num, column=col).fill = ORANGE_FILL
+            row_data[3] = 'NOT FOUND'
+            row_data[4] = 'NOT FOUND'
+            row_color = ORANGE_FILL
 
-        # Write requested extra columns (6, 7, 8)
-        ws.cell(row=row_num, column=6, value=status)
-        ws.cell(row=row_num, column=7, value=location)
-        ws.cell(row=row_num, column=8, value=exporter)
-
-        # Apply special highlighting
         if is_same_mac_diff_ip:
-            for col in range(1, 9):
-                ws.cell(row=row_num, column=col).fill = RED_FILL
+            row_color = RED_FILL
         elif is_duplicate_mac:
-            for col in range(1, 9):
-                ws.cell(row=row_num, column=col).fill = LIGHTBLUE_FILL
+            row_color = LIGHTBLUE_FILL
 
-        # Track written data
+        rows_buffer.append({'sort': sort_key, 'data': row_data, 'color': row_color})
+
         if mac:
             if mac not in written_macs: written_macs[mac] = []
-            written_macs[mac].append((row_num, camera_name, ip_address))
+            written_macs[mac].append((0, camera_name, ip_address))
+
+    # --- PASS 2: Add Inventory Items Not In Directory (Yellow) ---
+    print("Adding unmapped inventory items...")
+    count_yellow = 0
+    for mac, info in inventory_dict.items():
+        if mac not in used_macs:
+            switch_display = f"{info['switch_name']} [{info['switch_type']}]"
+            
+            row_data = [
+                'NAME NOT FOUND',   # 1
+                mac,                # 2
+                '',                 # 3
+                switch_display,     # 4
+                info['port'],       # 5
+                'UNKNOWN',          # 6
+                '',                 # 7
+                ''                  # 8
+            ]
+            
+            sort_key = (info['switch_name'], info['port'])
+            rows_buffer.append({'sort': sort_key, 'data': row_data, 'color': YELLOW_FILL})
+            count_yellow += 1
+
+    print(f"Added {count_yellow} extra devices found on switches.")
+
+    # --- PASS 3: Sort and Write ---
+    print("Sorting data by Switch and Port to group devices...")
+    
+    # Sort key: (Switch Name, Port). Converting to str ensures stability.
+    rows_buffer.sort(key=lambda x: (str(x['sort'][0]), str(x['sort'][1])))
+
+    print("Writing to Excel...")
+    row_num = 2
+    for item in rows_buffer:
+        data = item['data']
+        color = item['color']
+        
+        for i, value in enumerate(data, 1):
+            cell = ws.cell(row=row_num, column=i, value=value)
+            if color:
+                cell.fill = color
         
         row_num += 1
 
-    # Add inventory items not in directory (Yellow)
-    for mac, info in inventory_dict.items():
-        if mac not in used_macs:
-            ws.cell(row=row_num, column=1, value='NAME NOT FOUND')
-            ws.cell(row=row_num, column=2, value=mac)
-            ws.cell(row=row_num, column=4, value=f"{info['switch_name']} [{info['switch_type']}]")
-            ws.cell(row=row_num, column=5, value=info['port'])
-            for col in range(1, 9):
-                ws.cell(row=row_num, column=col).fill = YELLOW_FILL
-            row_num += 1
-
     wb.save(OUTPUT_EXCEL)
-    print(f"Successfully saved {row_num-2} rows to {OUTPUT_EXCEL}")
+    print(f"Successfully saved {row_num-2} sorted rows to {OUTPUT_EXCEL}")
 
 if __name__ == "__main__":
     main()
