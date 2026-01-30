@@ -18,7 +18,7 @@ TRACKER_CAMERA_SHEET = 'camera'
 
 OUTPUT_EXCEL = 'camera-switch-tracker.xlsx'
 
-# Column names in directory report
+# Default Column names (Script will auto-detect Exporter if this isn't exact)
 DIR_COL_CAMERA_NAME = 'Camera stream name'
 DIR_COL_CAMERA_STATE = 'Camera state/status'
 DIR_COL_IP_ADDRESS = 'IP address'
@@ -53,9 +53,6 @@ def get_inventory_file():
     return latest_file
 
 def main():
-    # FIX: Declare global at the very start of the function
-    global DIR_COL_EXPORTER 
-
     print("Searching for inventory file...")
     camera_inventory_json = get_inventory_file()
     
@@ -89,21 +86,28 @@ def main():
     # Force string type for MAC column to avoid scientific notation issues
     directory_df = pd.read_excel(DIRECTORY_REPORT_EXCEL, sheet_name=DIRECTORY_SHEET_NAME, dtype={DIR_COL_MAC_ADDRESS: str})
     
-    # --- Clean column names to handle trailing whitespace ---
+    # --- FIX 1: Clean column names ---
     directory_df.columns = directory_df.columns.str.strip()
     
-    # Debug: Check if columns exist
-    if DIR_COL_EXPORTER not in directory_df.columns:
-        print(f"⚠ WARNING: Column '{DIR_COL_EXPORTER}' not found. Found columns: {list(directory_df.columns)}")
-        # Try to find a close match or proceed without it
-        potential_match = next((c for c in directory_df.columns if 'Exporter' in c), None)
-        if potential_match:
-            print(f"✓ Using '{potential_match}' instead.")
-            DIR_COL_EXPORTER = potential_match
+    # --- FIX 2: Dynamically find the Exporter column ---
+    # We use a local variable 'actual_exporter_col' instead of modifying the global one
+    actual_exporter_col = DIR_COL_EXPORTER
     
+    if DIR_COL_EXPORTER not in directory_df.columns:
+        print(f"⚠ Standard column '{DIR_COL_EXPORTER}' not found. Searching...")
+        # Look for any column containing "Exporter" (case-insensitive)
+        found_col = next((c for c in directory_df.columns if 'exporter' in c.lower()), None)
+        if found_col:
+            print(f"✓ Found and using column: '{found_col}'")
+            actual_exporter_col = found_col
+        else:
+            print(f"❌ CRITICAL: Could not find any column looking like 'Exporter'. Exporter data will be empty.")
+            actual_exporter_col = None
+
     # Filter out empty/formatting rows
-    directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].notna()]
-    directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].astype(str).str.strip() != '']
+    if DIR_COL_CAMERA_NAME in directory_df.columns:
+        directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].notna()]
+        directory_df = directory_df[directory_df[DIR_COL_CAMERA_NAME].astype(str).str.strip() != '']
     
     directory_df['MAC_normalized'] = directory_df[DIR_COL_MAC_ADDRESS].apply(normalize_mac)
     
@@ -128,10 +132,13 @@ def main():
         ip_address = cam_row[DIR_COL_IP_ADDRESS]
         original_mac = cam_row[DIR_COL_MAC_ADDRESS]
         
-        # Safely get columns
+        # Safely get columns using the dynamically found column name
         status = cam_row.get(DIR_COL_CAMERA_STATE, '')
         location = cam_row.get(DIR_COL_LOCATION, '')
-        exporter = cam_row.get(DIR_COL_EXPORTER, '')
+        
+        exporter = ''
+        if actual_exporter_col:
+            exporter = cam_row.get(actual_exporter_col, '')
         
         # Conflict detection
         is_duplicate_mac = mac in written_macs if mac else False
